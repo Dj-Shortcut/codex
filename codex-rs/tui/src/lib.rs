@@ -963,8 +963,8 @@ fn resolve_config_cwd_for_toml_load(
     }
 
     match cwd_override {
-        Some(path) => AbsolutePathBuf::from_absolute_path(path.canonicalize()?)?,
-        None => AbsolutePathBuf::current_dir()?,
+        Some(path) => Ok(AbsolutePathBuf::from_absolute_path(path.canonicalize()?)?),
+        None => Ok(AbsolutePathBuf::current_dir()?),
     }
 }
 
@@ -1828,8 +1828,9 @@ mod tests {
             auth_token: None,
         };
 
-        let resolved = resolve_config_cwd_for_toml_load(Some(nonexistent.as_path()), &remote_target)
-            .expect("remote config cwd resolution should skip local cwd existence checks");
+        let resolved =
+            resolve_config_cwd_for_toml_load(Some(nonexistent.as_path()), &remote_target)
+                .expect("remote config cwd resolution should skip local cwd existence checks");
 
         assert_eq!(
             resolved,
@@ -1841,8 +1842,11 @@ mod tests {
     fn embedded_config_toml_cwd_requires_existing_cli_cwd() {
         let nonexistent = std::env::temp_dir().join(format!("codex-missing-{}", Uuid::new_v4()));
 
-        let err = resolve_config_cwd_for_toml_load(Some(nonexistent.as_path()), &AppServerTarget::Embedded)
-            .expect_err("embedded mode should still validate cwd locally");
+        let err = resolve_config_cwd_for_toml_load(
+            Some(nonexistent.as_path()),
+            &AppServerTarget::Embedded,
+        )
+        .expect_err("embedded mode should still validate cwd locally");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 

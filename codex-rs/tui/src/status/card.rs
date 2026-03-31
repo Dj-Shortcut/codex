@@ -32,6 +32,10 @@ use super::helpers::compose_agents_summary;
 use super::helpers::compose_model_display;
 use super::helpers::format_directory_display;
 use super::helpers::format_tokens_compact;
+use super::insights::CompactStatusInsights;
+use super::insights::FullObservabilityData;
+use super::insights::compute_compact_status_insights;
+use super::insights::compute_full_observability;
 use super::rate_limits::RateLimitSnapshotDisplay;
 use super::rate_limits::StatusRateLimitData;
 use super::rate_limits::StatusRateLimitRow;
@@ -58,6 +62,12 @@ pub(crate) struct StatusTokenUsageData {
     context_window: Option<StatusContextWindowData>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StatusRenderOptions {
+    pub full: bool,
+    pub session_started_at: Option<DateTime<Local>>,
+}
+
 #[derive(Debug)]
 struct StatusHistoryCell {
     model_name: String,
@@ -72,7 +82,10 @@ struct StatusHistoryCell {
     session_id: Option<String>,
     forked_from: Option<String>,
     token_usage: StatusTokenUsageData,
+    usage_insights: CompactStatusInsights,
     rate_limits: StatusRateLimitData,
+    full_mode: bool,
+    full_observability: Option<FullObservabilityData>,
 }
 
 #[cfg(test)]
@@ -110,6 +123,7 @@ pub(crate) fn new_status_output(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn new_status_output_with_rate_limits(
     config: &Config,
@@ -126,7 +140,47 @@ pub(crate) fn new_status_output_with_rate_limits(
     collaboration_mode: Option<&str>,
     reasoning_effort_override: Option<Option<ReasoningEffort>>,
 ) -> CompositeHistoryCell {
-    let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
+    new_status_output_with_rate_limits_and_options(
+        config,
+        account_display,
+        token_info,
+        total_usage,
+        session_id,
+        thread_name,
+        forked_from,
+        rate_limits,
+        _plan_type,
+        now,
+        model_name,
+        collaboration_mode,
+        reasoning_effort_override,
+        StatusRenderOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn new_status_output_with_rate_limits_and_options(
+    config: &Config,
+    account_display: Option<&StatusAccountDisplay>,
+    token_info: Option<&TokenUsageInfo>,
+    total_usage: &TokenUsage,
+    session_id: &Option<ThreadId>,
+    thread_name: Option<String>,
+    forked_from: Option<ThreadId>,
+    rate_limits: &[RateLimitSnapshotDisplay],
+    _plan_type: Option<PlanType>,
+    now: DateTime<Local>,
+    model_name: &str,
+    collaboration_mode: Option<&str>,
+    reasoning_effort_override: Option<Option<ReasoningEffort>>,
+    options: StatusRenderOptions,
+) -> CompositeHistoryCell {
+    let command_text = if options.full {
+        "/status --full"
+    } else {
+        "/status"
+    };
+    let command = PlainHistoryCell::new(vec![command_text.magenta().into()]);
     let card = StatusHistoryCell::new(
         config,
         account_display,
@@ -141,6 +195,7 @@ pub(crate) fn new_status_output_with_rate_limits(
         model_name,
         collaboration_mode,
         reasoning_effort_override,
+        options,
     );
 
     CompositeHistoryCell::new(vec![Box::new(command), Box::new(card)])
@@ -162,6 +217,7 @@ impl StatusHistoryCell {
         model_name: &str,
         collaboration_mode: Option<&str>,
         reasoning_effort_override: Option<Option<ReasoningEffort>>,
+        options: StatusRenderOptions,
     ) -> Self {
         let mut config_entries = vec![
             ("workdir", config.cwd.display().to_string()),
@@ -246,10 +302,22 @@ impl StatusHistoryCell {
             output: total_usage.output_tokens,
             context_window,
         };
-        let rate_limits = if rate_limits.len() <= 1 {
+        let composed_rate_limits = if rate_limits.len() <= 1 {
             compose_rate_limit_data(rate_limits.first(), now)
         } else {
             compose_rate_limit_data_many(rate_limits, now)
+        };
+        let usage_insights = compute_compact_status_insights(
+            total_usage,
+            token_info,
+            rate_limits,
+            now,
+            options.session_started_at,
+        );
+        let full_observability = if options.full {
+            compute_full_observability(config.codex_home.as_path(), now)
+        } else {
+            None
         };
 
         Self {
@@ -265,7 +333,10 @@ impl StatusHistoryCell {
             session_id,
             forked_from,
             token_usage,
-            rate_limits,
+            usage_insights,
+            rate_limits: composed_rate_limits,
+            full_mode: options.full,
+            full_observability,
         }
     }
 
@@ -301,6 +372,49 @@ impl StatusHistoryCell {
             Span::from(window_fmt).dim(),
             Span::from(")").dim(),
         ])
+    }
+
+    fn burn_rate_spans(&self) -> Vec<Span<'static>> {
+        match self.usage_insights.burn_rate_tpm {
+            Some(rate) => vec![Span::from(format!("{rate:.0} tok/min"))],
+            None => vec![Span::from("not enough data").dim()],
+        }
+    }
+
+    fn eta_spans(&self) -> Vec<Span<'static>> {
+        match self.usage_insights.eta_to_limit {
+            Some(duration) => {
+                let mut seconds = duration.num_seconds().max(0);
+                let days = seconds / 86_400;
+                seconds -= days * 86_400;
+                let hours = seconds / 3_600;
+                seconds -= hours * 3_600;
+                let minutes = seconds / 60;
+                let value = if days > 0 {
+                    format!("{days}d {hours}h")
+                } else if hours > 0 {
+                    format!("{hours}h {minutes}m")
+                } else {
+                    format!("{minutes}m")
+                };
+                vec![Span::from(value)]
+            }
+            None => vec![Span::from("unknown").dim()],
+        }
+    }
+
+    fn reset_spans(&self) -> Vec<Span<'static>> {
+        match self.usage_insights.reset_countdown.as_ref() {
+            Some(text) => vec![Span::from(text.clone())],
+            None => vec![Span::from("not available").dim()],
+        }
+    }
+
+    fn warnings_spans(&self) -> Vec<Span<'static>> {
+        if self.usage_insights.warnings.is_empty() {
+            return vec![Span::from("none").dim()];
+        }
+        vec![Span::from(self.usage_insights.warnings.join(", "))]
     }
 
     fn rate_limit_lines(
@@ -406,6 +520,87 @@ impl StatusHistoryCell {
             StatusRateLimitData::Missing => push_label(labels, seen, "Limits"),
         }
     }
+
+    fn full_observability_lines(&self, formatter: &FieldFormatter) -> Vec<Line<'static>> {
+        let Some(data) = self.full_observability.as_ref() else {
+            return vec![formatter.line(
+                "Observability",
+                vec![Span::from("unavailable (no local usage history found)").dim()],
+            )];
+        };
+
+        let mut lines = vec![
+            formatter.line(
+                "Today",
+                vec![Span::from(format!(
+                    "{} tokens",
+                    format_tokens_compact(data.today_tokens)
+                ))],
+            ),
+            formatter.line(
+                "Last 7 days",
+                vec![Span::from(format!(
+                    "{} tokens",
+                    format_tokens_compact(data.seven_day_tokens)
+                ))],
+            ),
+            formatter.line(
+                "Last 30 days",
+                vec![Span::from(format!(
+                    "{} tokens",
+                    format_tokens_compact(data.thirty_day_tokens)
+                ))],
+            ),
+            formatter.line(
+                "All-time",
+                vec![Span::from(format!(
+                    "{} tokens",
+                    format_tokens_compact(data.all_time_tokens)
+                ))],
+            ),
+            formatter.line(
+                "Active days",
+                vec![Span::from(format!(
+                    "{} (current streak {}d, longest {}d)",
+                    data.active_days, data.current_streak_days, data.longest_streak_days
+                ))],
+            ),
+        ];
+
+        if !data.model_usage.is_empty() {
+            for model in &data.model_usage {
+                let mut summary =
+                    format!("{}: {}", model.model, format_tokens_compact(model.tokens));
+                if model.cached_input_tokens > 0 {
+                    summary.push_str(&format!(
+                        " (cached {})",
+                        format_tokens_compact(model.cached_input_tokens)
+                    ));
+                }
+                lines.push(formatter.line("Model usage", vec![Span::from(summary)]));
+            }
+        }
+
+        let recent = data
+            .recent_days
+            .iter()
+            .map(|day| {
+                format!(
+                    "{} {}",
+                    day.day.format("%a"),
+                    format_tokens_compact(day.tokens)
+                )
+            })
+            .collect::<Vec<String>>()
+            .join("  ");
+        lines.push(formatter.line("Recent 7 days", vec![Span::from(recent)]));
+        lines.push(formatter.line(
+            "History files",
+            vec![Span::from(data.scanned_files.to_string()).dim()],
+        ));
+
+        lines
+    }
 }
 
 impl HistoryCell for StatusHistoryCell {
@@ -462,6 +657,10 @@ impl HistoryCell for StatusHistoryCell {
             push_label(&mut labels, &mut seen, "Collaboration mode");
         }
         push_label(&mut labels, &mut seen, "Token usage");
+        push_label(&mut labels, &mut seen, "Burn rate");
+        push_label(&mut labels, &mut seen, "ETA to limit");
+        push_label(&mut labels, &mut seen, "Reset");
+        push_label(&mut labels, &mut seen, "Usage warnings");
         if self.token_usage.context_window.is_some() {
             push_label(&mut labels, &mut seen, "Context window");
         }
@@ -529,12 +728,20 @@ impl HistoryCell for StatusHistoryCell {
         if !matches!(self.account, Some(StatusAccountDisplay::ChatGpt { .. })) {
             lines.push(formatter.line("Token usage", self.token_usage_spans()));
         }
+        lines.push(formatter.line("Burn rate", self.burn_rate_spans()));
+        lines.push(formatter.line("ETA to limit", self.eta_spans()));
+        lines.push(formatter.line("Reset", self.reset_spans()));
+        lines.push(formatter.line("Usage warnings", self.warnings_spans()));
 
         if let Some(spans) = self.context_window_spans() {
             lines.push(formatter.line("Context window", spans));
         }
 
         lines.extend(self.rate_limit_lines(available_inner_width, &formatter));
+        if self.full_mode {
+            lines.push(Line::from(Vec::<Span<'static>>::new()));
+            lines.extend(self.full_observability_lines(&formatter));
+        }
 
         let content_width = lines.iter().map(line_display_width).max().unwrap_or(0);
         let inner_width = content_width.min(available_inner_width);

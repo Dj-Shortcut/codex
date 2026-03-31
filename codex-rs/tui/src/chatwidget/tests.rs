@@ -1986,6 +1986,56 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
     );
 }
 
+#[tokio::test]
+async fn status_inline_args_full_renders_full_status_command() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Status, "--full".to_string(), vec![]);
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .last()
+        .expect("status output inserted")
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<String>>()
+        .join("\n");
+    assert!(
+        rendered.contains("/status --full"),
+        "expected /status --full command label, got: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn status_inline_args_invalid_shows_usage_message() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Status, "--invalid".to_string(), vec![]);
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .last()
+        .expect("usage error inserted")
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<String>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Usage: /status [--full]"),
+        "expected usage error for invalid /status args, got: {rendered}"
+    );
+}
+
 #[cfg_attr(
     target_os = "macos",
     ignore = "system configuration APIs are blocked under macOS seatbelt"

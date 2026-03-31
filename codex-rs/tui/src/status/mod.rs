@@ -10,12 +10,14 @@ mod account;
 mod card;
 mod format;
 mod helpers;
+mod insights;
 mod rate_limits;
 
 pub(crate) use account::StatusAccountDisplay;
+pub(crate) use card::StatusRenderOptions;
 #[cfg(test)]
 pub(crate) use card::new_status_output;
-pub(crate) use card::new_status_output_with_rate_limits;
+pub(crate) use card::new_status_output_with_rate_limits_and_options;
 pub(crate) use helpers::format_directory_display;
 pub(crate) use helpers::format_tokens_compact;
 pub(crate) use helpers::plan_type_display_name;

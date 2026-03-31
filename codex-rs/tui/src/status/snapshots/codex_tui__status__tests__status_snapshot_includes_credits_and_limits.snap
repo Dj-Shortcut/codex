@@ -1,5 +1,6 @@
 ---
 source: tui/src/status/tests.rs
+assertion_line: 771
 expression: sanitized
 ---
 /status
@@ -16,6 +17,10 @@ expression: sanitized
 │  Agents.md:        <none>                                         │
 │                                                                   │
 │  Token usage:      2K total  (1.4K input + 600 output)            │
+│  Burn rate:        not enough data                                │
+│  ETA to limit:     5h 48m                                         │
+│  Reset:            resets in 15m (09:25)                          │
+│  Usage warnings:   none                                           │
 │  Context window:   100% left (2.2K used / 272K)                   │
 │  5h limit:         [███████████░░░░░░░░░] 55% left (resets 09:25) │
 │  Weekly limit:     [██████████████░░░░░░] 70% left (resets 09:55) │

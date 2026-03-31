@@ -1,4 +1,6 @@
+use super::StatusRenderOptions;
 use super::new_status_output;
+use super::new_status_output_with_rate_limits_and_options;
 use super::rate_limit_snapshot_display;
 use crate::history_cell::HistoryCell;
 use crate::status::StatusAccountDisplay;
@@ -10,17 +12,22 @@ use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
 use ratatui::prelude::*;
+use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -1023,5 +1030,324 @@ async fn status_context_window_uses_last_usage() {
     assert!(
         !context_line.contains("102K"),
         "context line should not use total aggregated tokens, got: {context_line}"
+    );
+}
+
+#[tokio::test]
+async fn status_full_mode_uses_full_command_label() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.1-codex-max".to_string());
+    config.cwd = PathBuf::from("/workspace/tests").abs();
+
+    let usage = TokenUsage::default();
+    let now = chrono::Local
+        .with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
+        .single()
+        .expect("timestamp");
+    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+
+    let composite = new_status_output_with_rate_limits_and_options(
+        &config,
+        /*account_display*/ None,
+        /*token_info*/ None,
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        /*rate_limits*/ &[],
+        None,
+        now,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+        StatusRenderOptions {
+            full: true,
+            session_started_at: None,
+        },
+    );
+    let rendered = render_lines(&composite.display_lines(/*width*/ 120));
+    let command_line = rendered
+        .first()
+        .expect("status output should include command line");
+    assert!(
+        command_line.contains("/status --full"),
+        "expected /status --full command label, got {command_line}"
+    );
+}
+
+#[tokio::test]
+async fn status_full_mode_shows_observability_section_when_history_missing() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.1-codex-max".to_string());
+    config.cwd = PathBuf::from("/workspace/tests").abs();
+
+    let usage = TokenUsage::default();
+    let now = chrono::Local
+        .with_ymd_and_hms(2024, 6, 1, 12, 0, 0)
+        .single()
+        .expect("timestamp");
+    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+
+    let composite = new_status_output_with_rate_limits_and_options(
+        &config,
+        /*account_display*/ None,
+        /*token_info*/ None,
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        /*rate_limits*/ &[],
+        None,
+        now,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+        StatusRenderOptions {
+            full: true,
+            session_started_at: None,
+        },
+    );
+    let rendered = render_lines(&composite.display_lines(/*width*/ 120));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("Observability:") && line.contains("unavailable")),
+        "expected observability unavailable line, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn status_full_mode_includes_per_model_breakdown_lines() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.1-codex-max".to_string());
+    config.cwd = PathBuf::from("/workspace/tests").abs();
+
+    let sessions_dir = config
+        .codex_home
+        .join("sessions")
+        .join("2026")
+        .join("01")
+        .join("10");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let rollout_path = sessions_dir.join("rollout-2026-01-10T12-00-00-000000000Z.jsonl");
+
+    let turn_context_alpha = RolloutLine {
+        timestamp: "2026-01-10T12:00:00Z".to_string(),
+        item: RolloutItem::TurnContext(codex_protocol::protocol::TurnContextItem {
+            turn_id: Some("turn-1".to_string()),
+            trace_id: None,
+            cwd: PathBuf::from("/workspace/tests"),
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::OnRequest,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            network: None,
+            model: "alpha-model".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            realtime_active: None,
+            effort: None,
+            summary: ReasoningSummaryConfig::Auto,
+            user_instructions: None,
+            developer_instructions: None,
+            final_output_json_schema: None,
+            truncation_policy: None,
+        }),
+    };
+    let token_count_alpha = RolloutLine {
+        timestamp: "2026-01-10T12:00:05Z".to_string(),
+        item: RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::TokenCount(
+            TokenCountEvent {
+                info: Some(TokenUsageInfo {
+                    total_token_usage: TokenUsage::default(),
+                    last_token_usage: TokenUsage {
+                        input_tokens: 260,
+                        cached_input_tokens: 100,
+                        output_tokens: 140,
+                        reasoning_output_tokens: 0,
+                        total_tokens: 400,
+                    },
+                    model_context_window: None,
+                }),
+                rate_limits: None,
+            },
+        )),
+    };
+    let turn_context_beta = RolloutLine {
+        timestamp: "2026-01-10T12:01:00Z".to_string(),
+        item: RolloutItem::TurnContext(codex_protocol::protocol::TurnContextItem {
+            turn_id: Some("turn-2".to_string()),
+            trace_id: None,
+            cwd: PathBuf::from("/workspace/tests"),
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::OnRequest,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            network: None,
+            model: "beta-model".to_string(),
+            personality: None,
+            collaboration_mode: None,
+            realtime_active: None,
+            effort: None,
+            summary: ReasoningSummaryConfig::Auto,
+            user_instructions: None,
+            developer_instructions: None,
+            final_output_json_schema: None,
+            truncation_policy: None,
+        }),
+    };
+    let token_count_beta = RolloutLine {
+        timestamp: "2026-01-10T12:01:05Z".to_string(),
+        item: RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::TokenCount(
+            TokenCountEvent {
+                info: Some(TokenUsageInfo {
+                    total_token_usage: TokenUsage::default(),
+                    last_token_usage: TokenUsage {
+                        input_tokens: 40,
+                        cached_input_tokens: 0,
+                        output_tokens: 80,
+                        reasoning_output_tokens: 0,
+                        total_tokens: 120,
+                    },
+                    model_context_window: None,
+                }),
+                rate_limits: None,
+            },
+        )),
+    };
+    let rollout_lines = vec![
+        turn_context_alpha,
+        token_count_alpha,
+        turn_context_beta,
+        token_count_beta,
+    ]
+    .into_iter()
+    .map(|line| serde_json::to_string(&line).expect("serialize rollout line"))
+    .collect::<Vec<String>>()
+    .join("\n");
+    fs::write(rollout_path, format!("{rollout_lines}\n")).expect("write rollout");
+
+    let usage = TokenUsage::default();
+    let now = chrono::Local
+        .with_ymd_and_hms(2026, 1, 10, 12, 5, 0)
+        .single()
+        .expect("timestamp");
+    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let composite = new_status_output_with_rate_limits_and_options(
+        &config,
+        /*account_display*/ None,
+        /*token_info*/ None,
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        /*rate_limits*/ &[],
+        None,
+        now,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+        StatusRenderOptions {
+            full: true,
+            session_started_at: None,
+        },
+    );
+    let rendered = render_lines(&composite.display_lines(/*width*/ 120));
+
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("Model usage:") && line.contains("alpha-model: 300")),
+        "expected first model usage row, got {rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("Model usage:") && line.contains("beta-model: 120")),
+        "expected second model usage row, got {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|line| line.contains("cached 100")),
+        "expected cached usage details for alpha-model, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn status_compact_mode_readability_guard() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.1-codex-max".to_string());
+    config.cwd = PathBuf::from("/workspace/tests").abs();
+
+    let usage = TokenUsage {
+        input_tokens: 1_200,
+        cached_input_tokens: 200,
+        output_tokens: 900,
+        reasoning_output_tokens: 150,
+        total_tokens: 2_250,
+    };
+    let captured_at = chrono::Local
+        .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+        .single()
+        .expect("timestamp");
+    let snapshot = RateLimitSnapshot {
+        limit_id: None,
+        limit_name: None,
+        primary: Some(RateLimitWindow {
+            used_percent: 72.5,
+            window_minutes: Some(300),
+            resets_at: Some(reset_at_from(&captured_at, /*seconds*/ 600)),
+        }),
+        secondary: Some(RateLimitWindow {
+            used_percent: 45.0,
+            window_minutes: Some(10_080),
+            resets_at: Some(reset_at_from(&captured_at, /*seconds*/ 1_200)),
+        }),
+        credits: None,
+        plan_type: None,
+    };
+    let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
+    let model_slug = codex_core::test_support::get_model_offline(config.model.as_deref());
+    let token_info = token_info_for(&model_slug, &config, &usage);
+
+    let composite = new_status_output_with_rate_limits_and_options(
+        &config,
+        /*account_display*/ None,
+        Some(&token_info),
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        &[rate_display],
+        None,
+        captured_at,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+        StatusRenderOptions {
+            full: false,
+            session_started_at: None,
+        },
+    );
+    let rendered = render_lines(&composite.display_lines(/*width*/ 120));
+    let field_lines = rendered
+        .iter()
+        .filter(|line| line.contains(':') && !line.contains("https://"))
+        .count();
+
+    assert!(
+        field_lines <= 18,
+        "compact status should stay concise; found {field_lines} field lines"
+    );
+    assert!(
+        rendered.iter().all(|line| !line.contains("Observability:")),
+        "compact status must not include full observability section"
+    );
+    assert!(
+        rendered.iter().all(|line| !line.contains("Recent 7 days:")),
+        "compact status must not include usage history rows"
     );
 }

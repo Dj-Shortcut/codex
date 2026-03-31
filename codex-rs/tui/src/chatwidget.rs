@@ -364,7 +364,10 @@ use crate::streaming::commit_tick::run_commit_tick;
 use crate::streaming::controller::PlanStreamController;
 use crate::streaming::controller::StreamController;
 
+use chrono::DateTime;
 use chrono::Local;
+use chrono::NaiveDateTime;
+use chrono::TimeZone;
 use codex_file_search::FileMatch;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelPreset;
@@ -5259,6 +5262,17 @@ impl ChatWidget {
 
         let trimmed = args.trim();
         match cmd {
+            SlashCommand::Status => {
+                if trimmed.is_empty() {
+                    self.add_status_output();
+                    return;
+                }
+                if trimmed == "--full" {
+                    self.add_status_output_full();
+                    return;
+                }
+                self.add_error_message("Usage: /status [--full]".to_string());
+            }
             SlashCommand::Fast => {
                 if trimmed.is_empty() {
                     self.dispatch_command(cmd);
@@ -7170,6 +7184,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn add_status_output(&mut self) {
+        let session_started_at = self.session_started_at_from_rollout_path();
         let default_usage = TokenUsage::default();
         let token_info = self.token_info.as_ref();
         let total_usage = token_info
@@ -7182,21 +7197,69 @@ impl ChatWidget {
             .values()
             .cloned()
             .collect();
-        self.add_to_history(crate::status::new_status_output_with_rate_limits(
-            &self.config,
-            self.status_account_display.as_ref(),
-            token_info,
-            total_usage,
-            &self.thread_id,
-            self.thread_name.clone(),
-            self.forked_from,
-            rate_limit_snapshots.as_slice(),
-            self.plan_type,
-            Local::now(),
-            self.model_display_name(),
-            collaboration_mode,
-            reasoning_effort_override,
-        ));
+        self.add_to_history(
+            crate::status::new_status_output_with_rate_limits_and_options(
+                &self.config,
+                self.status_account_display.as_ref(),
+                token_info,
+                total_usage,
+                &self.thread_id,
+                self.thread_name.clone(),
+                self.forked_from,
+                rate_limit_snapshots.as_slice(),
+                self.plan_type,
+                Local::now(),
+                self.model_display_name(),
+                collaboration_mode,
+                reasoning_effort_override,
+                crate::status::StatusRenderOptions {
+                    full: false,
+                    session_started_at,
+                },
+            ),
+        );
+    }
+
+    pub(crate) fn add_status_output_full(&mut self) {
+        let session_started_at = self.session_started_at_from_rollout_path();
+        let default_usage = TokenUsage::default();
+        let token_info = self.token_info.as_ref();
+        let total_usage = token_info
+            .map(|ti| &ti.total_token_usage)
+            .unwrap_or(&default_usage);
+        let collaboration_mode = self.collaboration_mode_label();
+        let reasoning_effort_override = Some(self.effective_reasoning_effort());
+        let rate_limit_snapshots: Vec<RateLimitSnapshotDisplay> = self
+            .rate_limit_snapshots_by_limit_id
+            .values()
+            .cloned()
+            .collect();
+        self.add_to_history(
+            crate::status::new_status_output_with_rate_limits_and_options(
+                &self.config,
+                self.status_account_display.as_ref(),
+                token_info,
+                total_usage,
+                &self.thread_id,
+                self.thread_name.clone(),
+                self.forked_from,
+                rate_limit_snapshots.as_slice(),
+                self.plan_type,
+                Local::now(),
+                self.model_display_name(),
+                collaboration_mode,
+                reasoning_effort_override,
+                crate::status::StatusRenderOptions {
+                    full: true,
+                    session_started_at,
+                },
+            ),
+        );
+    }
+
+    fn session_started_at_from_rollout_path(&self) -> Option<DateTime<Local>> {
+        let rollout_path = self.current_rollout_path.as_ref()?;
+        parse_rollout_started_at(rollout_path)
     }
 
     pub(crate) fn add_debug_config_output(&mut self) {
@@ -10653,6 +10716,15 @@ impl ChatWidget {
         );
         RenderableItem::Owned(Box::new(flex))
     }
+}
+
+fn parse_rollout_started_at(path: &Path) -> Option<DateTime<Local>> {
+    let file_name = path.file_name()?.to_str()?;
+    let core = file_name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    let timestamp_part = core.get(..19)?;
+    let naive = NaiveDateTime::parse_from_str(timestamp_part, "%Y-%m-%dT%H-%M-%S").ok()?;
+    let local = Local.from_local_datetime(&naive).single()?;
+    Some(local)
 }
 
 #[cfg(not(target_os = "linux"))]
