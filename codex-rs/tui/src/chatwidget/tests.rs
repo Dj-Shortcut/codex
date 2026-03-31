@@ -197,6 +197,17 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::unbounded_channel;
 use toml::Value as TomlValue;
 
+#[test]
+fn parse_rollout_started_at_treats_z_timestamps_as_utc() {
+    let path = PathBuf::from("rollout-2026-01-10T12-00-00-000000000Z.jsonl");
+    let parsed = parse_rollout_started_at(path.as_path()).expect("parse rollout timestamp");
+    let expected = chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
+        .expect("parse expected timestamp")
+        .with_timezone(&Local);
+
+    assert_eq!(parsed.timestamp(), expected.timestamp());
+}
+
 async fn test_config() -> Config {
     // Use base defaults to avoid depending on host state.
     let codex_home = std::env::temp_dir();

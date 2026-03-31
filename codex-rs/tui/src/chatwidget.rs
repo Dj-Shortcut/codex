@@ -368,6 +368,7 @@ use chrono::DateTime;
 use chrono::Local;
 use chrono::NaiveDateTime;
 use chrono::TimeZone;
+use chrono::Utc;
 use codex_file_search::FileMatch;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelPreset;
@@ -10721,10 +10722,21 @@ impl ChatWidget {
 fn parse_rollout_started_at(path: &Path) -> Option<DateTime<Local>> {
     let file_name = path.file_name()?.to_str()?;
     let core = file_name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+
+    if let Ok(naive_utc) = NaiveDateTime::parse_from_str(core, "%Y-%m-%dT%H-%M-%S-%fZ") {
+        return Some(
+            DateTime::<Utc>::from_naive_utc_and_offset(naive_utc, Utc).with_timezone(&Local),
+        );
+    }
+    if let Ok(naive_utc) = NaiveDateTime::parse_from_str(core, "%Y-%m-%dT%H-%M-%SZ") {
+        return Some(
+            DateTime::<Utc>::from_naive_utc_and_offset(naive_utc, Utc).with_timezone(&Local),
+        );
+    }
+
     let timestamp_part = core.get(..19)?;
-    let naive = NaiveDateTime::parse_from_str(timestamp_part, "%Y-%m-%dT%H-%M-%S").ok()?;
-    let local = Local.from_local_datetime(&naive).single()?;
-    Some(local)
+    let naive_local = NaiveDateTime::parse_from_str(timestamp_part, "%Y-%m-%dT%H-%M-%S").ok()?;
+    Local.from_local_datetime(&naive_local).single()
 }
 
 #[cfg(not(target_os = "linux"))]
