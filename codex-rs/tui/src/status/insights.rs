@@ -231,6 +231,7 @@ pub(crate) fn compute_full_observability(
         return None;
     }
 
+    sort_rollout_files_by_recency(&mut files);
     if files.len() > MAX_OBSERVABILITY_FILES {
         files.truncate(MAX_OBSERVABILITY_FILES);
     }
@@ -339,7 +340,7 @@ fn compute_streaks(by_day: &BTreeMap<NaiveDate, i64>, today: NaiveDate) -> (usiz
 }
 
 fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) {
-    if files.len() >= MAX_OBSERVABILITY_FILES || !root.exists() {
+    if !root.exists() {
         return;
     }
 
@@ -348,9 +349,6 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) {
     };
 
     for entry in entries.flatten() {
-        if files.len() >= MAX_OBSERVABILITY_FILES {
-            break;
-        }
         let path = entry.path();
         if path.is_dir() {
             collect_rollout_files(path.as_path(), files);
@@ -363,6 +361,20 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) {
             files.push(path);
         }
     }
+}
+
+fn sort_rollout_files_by_recency(files: &mut [PathBuf]) {
+    files.sort_by(|a, b| {
+        rollout_file_recency_key(b)
+            .cmp(&rollout_file_recency_key(a))
+            .then_with(|| a.cmp(b))
+    });
+}
+
+fn rollout_file_recency_key(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let core = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    Some(core.to_string())
 }
 
 fn parse_rollout_usage(
@@ -446,6 +458,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use pretty_assertions::assert_eq;
+    use std::path::PathBuf;
 
     #[test]
     fn calculates_burn_rate_tokens_per_minute() {
@@ -470,5 +483,45 @@ mod tests {
         let (current, longest) = compute_streaks(&by_day, today);
         assert_eq!(current, 2);
         assert_eq!(longest, 2);
+    }
+
+    #[test]
+    fn sort_rollout_files_prioritizes_newest_timestamped_names() {
+        let mut files = vec![
+            PathBuf::from("sessions/2026/01/09/rollout-2026-01-09T12-00-00-000000000Z.jsonl"),
+            PathBuf::from("sessions/2026/01/10/rollout-2026-01-10T01-00-00-000000000Z.jsonl"),
+            PathBuf::from("sessions/2026/01/08/rollout-2026-01-08T20-00-00-000000000Z.jsonl"),
+        ];
+
+        sort_rollout_files_by_recency(&mut files);
+
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("sessions/2026/01/10/rollout-2026-01-10T01-00-00-000000000Z.jsonl"),
+                PathBuf::from("sessions/2026/01/09/rollout-2026-01-09T12-00-00-000000000Z.jsonl"),
+                PathBuf::from("sessions/2026/01/08/rollout-2026-01-08T20-00-00-000000000Z.jsonl"),
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_rollout_files_falls_back_for_non_standard_names() {
+        let mut files = vec![
+            PathBuf::from("sessions/rollout-2026-01-10T01-00-00-000000000Z.jsonl"),
+            PathBuf::from("sessions/not-a-rollout-file.jsonl"),
+            PathBuf::from("sessions/rollout-2026-01-11T01-00-00-000000000Z.jsonl"),
+        ];
+
+        sort_rollout_files_by_recency(&mut files);
+
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("sessions/rollout-2026-01-11T01-00-00-000000000Z.jsonl"),
+                PathBuf::from("sessions/rollout-2026-01-10T01-00-00-000000000Z.jsonl"),
+                PathBuf::from("sessions/not-a-rollout-file.jsonl"),
+            ]
+        );
     }
 }
