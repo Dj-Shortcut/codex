@@ -8,6 +8,7 @@ use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -377,6 +378,21 @@ fn rollout_file_recency_key(path: &Path) -> Option<String> {
     Some(core.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TokenSnapshotKey {
+    model: String,
+    total_input_tokens: i64,
+    total_cached_input_tokens: i64,
+    total_output_tokens: i64,
+    total_reasoning_output_tokens: i64,
+    total_tokens: i64,
+    last_input_tokens: i64,
+    last_cached_input_tokens: i64,
+    last_output_tokens: i64,
+    last_reasoning_output_tokens: i64,
+    last_total_tokens: i64,
+}
+
 fn parse_rollout_usage(
     path: &Path,
     by_day: &mut BTreeMap<NaiveDate, i64>,
@@ -387,6 +403,7 @@ fn parse_rollout_usage(
     };
     let reader = BufReader::new(file);
     let mut model_for_turn = "unknown".to_string();
+    let mut seen_snapshots: HashSet<TokenSnapshotKey> = HashSet::new();
 
     for (idx, line) in reader.lines().enumerate() {
         if idx >= MAX_OBSERVABILITY_LINES_PER_FILE {
@@ -414,6 +431,22 @@ fn parse_rollout_usage(
                 let Some(info) = token_count.info else {
                     continue;
                 };
+                let snapshot_key = TokenSnapshotKey {
+                    model: model_for_turn.clone(),
+                    total_input_tokens: info.total_token_usage.input_tokens,
+                    total_cached_input_tokens: info.total_token_usage.cached_input_tokens,
+                    total_output_tokens: info.total_token_usage.output_tokens,
+                    total_reasoning_output_tokens: info.total_token_usage.reasoning_output_tokens,
+                    total_tokens: info.total_token_usage.total_tokens,
+                    last_input_tokens: info.last_token_usage.input_tokens,
+                    last_cached_input_tokens: info.last_token_usage.cached_input_tokens,
+                    last_output_tokens: info.last_token_usage.output_tokens,
+                    last_reasoning_output_tokens: info.last_token_usage.reasoning_output_tokens,
+                    last_total_tokens: info.last_token_usage.total_tokens,
+                };
+                if !seen_snapshots.insert(snapshot_key) {
+                    continue;
+                }
                 let usage = info.last_token_usage;
                 let tokens = usage.blended_total().max(0);
                 if tokens == 0 {
@@ -457,8 +490,13 @@ fn infer_day_from_file_name(path: &Path) -> Option<NaiveDate> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::SandboxPolicy;
+    use codex_protocol::protocol::TokenCountEvent;
     use pretty_assertions::assert_eq;
+    use std::io::Write;
     use std::path::PathBuf;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn calculates_burn_rate_tokens_per_minute() {
@@ -522,6 +560,89 @@ mod tests {
                 PathBuf::from("sessions/rollout-2026-01-10T01-00-00-000000000Z.jsonl"),
                 PathBuf::from("sessions/not-a-rollout-file.jsonl"),
             ]
+        );
+    }
+
+    #[test]
+    fn parse_rollout_usage_deduplicates_repeated_token_snapshots() {
+        let mut rollout = NamedTempFile::new().expect("temp rollout file");
+
+        let turn_context = RolloutLine {
+            timestamp: "2026-01-10T12:00:00Z".to_string(),
+            item: RolloutItem::TurnContext(codex_protocol::protocol::TurnContextItem {
+                turn_id: Some("turn-1".to_string()),
+                trace_id: None,
+                cwd: PathBuf::from("/workspace/tests"),
+                current_date: None,
+                timezone: None,
+                approval_policy: AskForApproval::OnRequest,
+                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                network: None,
+                model: "alpha-model".to_string(),
+                personality: None,
+                collaboration_mode: None,
+                realtime_active: None,
+                effort: None,
+                summary: codex_protocol::config_types::ReasoningSummary::Auto,
+                user_instructions: None,
+                developer_instructions: None,
+                final_output_json_schema: None,
+                truncation_policy: None,
+            }),
+        };
+        let token_count = RolloutLine {
+            timestamp: "2026-01-10T12:00:05Z".to_string(),
+            item: RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+                info: Some(TokenUsageInfo {
+                    total_token_usage: TokenUsage {
+                        input_tokens: 260,
+                        cached_input_tokens: 100,
+                        output_tokens: 140,
+                        reasoning_output_tokens: 0,
+                        total_tokens: 400,
+                    },
+                    last_token_usage: TokenUsage {
+                        input_tokens: 260,
+                        cached_input_tokens: 100,
+                        output_tokens: 140,
+                        reasoning_output_tokens: 0,
+                        total_tokens: 400,
+                    },
+                    model_context_window: None,
+                }),
+                rate_limits: None,
+            })),
+        };
+
+        writeln!(
+            rollout,
+            "{}",
+            serde_json::to_string(&turn_context).expect("serialize turn context")
+        )
+        .expect("write turn context");
+        writeln!(
+            rollout,
+            "{}",
+            serde_json::to_string(&token_count).expect("serialize token count")
+        )
+        .expect("write token count");
+        writeln!(
+            rollout,
+            "{}",
+            serde_json::to_string(&token_count).expect("serialize duplicated token count")
+        )
+        .expect("write duplicated token count");
+
+        let mut by_day: BTreeMap<NaiveDate, i64> = BTreeMap::new();
+        let mut by_model: BTreeMap<String, ModelUsageSummary> = BTreeMap::new();
+        parse_rollout_usage(rollout.path(), &mut by_day, &mut by_model);
+
+        let day = NaiveDate::from_ymd_opt(2026, 1, 10).expect("date");
+        assert_eq!(by_day.get(&day), Some(&300));
+        assert_eq!(by_model.get("alpha-model").map(|m| m.tokens), Some(300));
+        assert_eq!(
+            by_model.get("alpha-model").map(|m| m.cached_input_tokens),
+            Some(100)
         );
     }
 }
