@@ -21,6 +21,7 @@ use super::rate_limits::RateLimitWindowDisplay;
 
 const HIGH_BURN_RATE_TOKENS_PER_MIN: f64 = 4_000.0;
 const HIGH_CONTEXT_USED_PERCENT: i64 = 80;
+const HIGH_RATE_LIMIT_USED_PERCENT: f64 = 80.0;
 const MAX_OBSERVABILITY_FILES: usize = 500;
 const MAX_OBSERVABILITY_LINES_PER_FILE: usize = 20_000;
 
@@ -72,7 +73,7 @@ pub(crate) fn compute_compact_status_insights(
     let reset_countdown = format_reset_countdown(rate_limits, now);
     let mut warnings = vec![];
 
-    if max_used_percent(rate_limits).is_some_and(|used| used >= 80.0) {
+    if max_used_percent(rate_limits).is_some_and(|used| used >= HIGH_RATE_LIMIT_USED_PERCENT) {
         warnings.push("usage above 80% of limit".to_string());
     }
     if burn_rate_tpm.is_some_and(|rate| rate >= HIGH_BURN_RATE_TOKENS_PER_MIN) {
@@ -154,7 +155,7 @@ fn estimate_eta_to_limit(
 
 fn eta_for_window(window: &RateLimitWindowDisplay, now: DateTime<Local>) -> Option<ChronoDuration> {
     let used_percent = window.used_percent.clamp(0.0, 100.0);
-    if !(0.0..100.0).contains(&used_percent) {
+    if used_percent <= 0.0 || used_percent >= 100.0 {
         return None;
     }
 
@@ -352,7 +353,13 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
             collect_rollout_files(path.as_path(), files);
             continue;
         }
