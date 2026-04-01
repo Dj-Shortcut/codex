@@ -208,6 +208,22 @@ fn parse_rollout_started_at_treats_z_timestamps_as_utc() {
     assert_eq!(parsed.timestamp(), expected.timestamp());
 }
 
+#[test]
+fn parse_rollout_started_at_treats_uuid_filenames_as_local_time() {
+    let path =
+        PathBuf::from("rollout-2026-01-10T12-00-00-123e4567-e89b-12d3-a456-426614174000.jsonl");
+    let parsed = parse_rollout_started_at(path.as_path()).expect("parse rollout timestamp");
+    let naive_local =
+        chrono::NaiveDateTime::parse_from_str("2026-01-10T12-00-00", "%Y-%m-%dT%H-%M-%S")
+            .expect("naive local");
+    let expected = Local
+        .from_local_datetime(&naive_local)
+        .single()
+        .expect("unambiguous local datetime");
+
+    assert_eq!(parsed.timestamp(), expected.timestamp());
+}
+
 async fn test_config() -> Config {
     // Use base defaults to avoid depending on host state.
     let codex_home = std::env::temp_dir();

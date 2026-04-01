@@ -10734,6 +10734,9 @@ fn parse_rollout_started_at(path: &Path) -> Option<DateTime<Local>> {
         );
     }
 
+    // Legacy rollout filenames include a UUID suffix and are generated from
+    // `OffsetDateTime::now_local()` in rollout recorder, so parse this fallback
+    // as local wall-clock time.
     let timestamp_part = core.get(..19)?;
     let naive_local = NaiveDateTime::parse_from_str(timestamp_part, "%Y-%m-%dT%H-%M-%S").ok()?;
     Local.from_local_datetime(&naive_local).single()
