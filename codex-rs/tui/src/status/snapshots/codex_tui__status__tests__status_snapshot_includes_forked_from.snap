@@ -1,5 +1,6 @@
 ---
 source: tui/src/status/tests.rs
+assertion_line: 289
 expression: sanitized
 ---
 /status
@@ -18,6 +19,10 @@ expression: sanitized
 │  Forked from:      e9f18a88-8081-4e51-9d4e-8af5cde2d8dd               │
 │                                                                       │
 │  Token usage:      1.2K total  (800 input + 400 output)               │
+│  Burn rate:        not enough data                                    │
+│  ETA to limit:     unknown                                            │
+│  Reset:            not available                                      │
+│  Usage warnings:   none                                               │
 │  Context window:   100% left (1.2K used / 272K)                       │
 │  Limits:           data not available yet                             │
 ╰───────────────────────────────────────────────────────────────────────╯

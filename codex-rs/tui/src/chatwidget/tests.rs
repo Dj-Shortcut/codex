@@ -199,6 +199,33 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::unbounded_channel;
 use toml::Value as TomlValue;
 
+#[test]
+fn parse_rollout_started_at_treats_z_timestamps_as_utc() {
+    let path = PathBuf::from("rollout-2026-01-10T12-00-00-000000000Z.jsonl");
+    let parsed = parse_rollout_started_at(path.as_path()).expect("parse rollout timestamp");
+    let expected = chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
+        .expect("parse expected timestamp")
+        .with_timezone(&Local);
+
+    assert_eq!(parsed.timestamp(), expected.timestamp());
+}
+
+#[test]
+fn parse_rollout_started_at_treats_uuid_filenames_as_local_time() {
+    let path =
+        PathBuf::from("rollout-2026-01-10T12-00-00-123e4567-e89b-12d3-a456-426614174000.jsonl");
+    let parsed = parse_rollout_started_at(path.as_path()).expect("parse rollout timestamp");
+    let naive_local =
+        chrono::NaiveDateTime::parse_from_str("2026-01-10T12-00-00", "%Y-%m-%dT%H-%M-%S")
+            .expect("naive local");
+    let expected = Local
+        .from_local_datetime(&naive_local)
+        .single()
+        .expect("unambiguous local datetime");
+
+    assert_eq!(parsed.timestamp(), expected.timestamp());
+}
+
 async fn test_config() -> Config {
     // Use base defaults to avoid depending on host state.
     let codex_home = std::env::temp_dir();
@@ -1985,6 +2012,56 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
     assert!(
         !context_line.contains("1M"),
         "expected /status to avoid raw config context window, got: {context_line}"
+    );
+}
+
+#[tokio::test]
+async fn status_inline_args_full_renders_full_status_command() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Status, "--full".to_string(), vec![]);
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .last()
+        .expect("status output inserted")
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<String>>()
+        .join("\n");
+    assert!(
+        rendered.contains("/status --full"),
+        "expected /status --full command label, got: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn status_inline_args_invalid_shows_usage_message() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Status, "--invalid".to_string(), vec![]);
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .last()
+        .expect("usage error inserted")
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<String>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Usage: /status [--full]"),
+        "expected usage error for invalid /status args, got: {rendered}"
     );
 }
 

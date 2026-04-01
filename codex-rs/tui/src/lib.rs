@@ -652,10 +652,7 @@ pub async fn run_main(
     };
 
     let cwd = cli.cwd.clone();
-    let config_cwd = match cwd.as_deref() {
-        Some(path) => AbsolutePathBuf::from_absolute_path(path.canonicalize()?)?,
-        None => AbsolutePathBuf::current_dir()?,
-    };
+    let config_cwd = resolve_config_cwd_for_toml_load(cwd.as_deref(), &app_server_target)?;
 
     #[allow(clippy::print_stderr)]
     let config_toml = match load_config_as_toml_with_cli_overrides(
@@ -915,6 +912,22 @@ pub async fn run_main(
     )
     .await
     .map_err(|err| std::io::Error::other(err.to_string()))
+}
+
+fn resolve_config_cwd_for_toml_load(
+    cwd_override: Option<&Path>,
+    app_server_target: &AppServerTarget,
+) -> std::io::Result<AbsolutePathBuf> {
+    if matches!(app_server_target, AppServerTarget::Remote { .. }) {
+        // In remote mode, `--cd` can validly point to a path that only exists on the
+        // remote host. Use local current-dir for config resolution to avoid local fs checks.
+        return AbsolutePathBuf::current_dir();
+    }
+
+    match cwd_override {
+        Some(path) => Ok(AbsolutePathBuf::from_absolute_path(path.canonicalize()?)?),
+        None => Ok(AbsolutePathBuf::current_dir()?),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1767,6 +1780,36 @@ mod tests {
             err.to_string()
                 .contains("remote auth tokens require `wss://` or loopback `ws://` URLs")
         );
+    }
+
+    #[test]
+    fn remote_config_toml_cwd_ignores_nonexistent_cli_cwd() {
+        let nonexistent = std::env::temp_dir().join(format!("codex-missing-{}", Uuid::new_v4()));
+        let remote_target = AppServerTarget::Remote {
+            websocket_url: "ws://127.0.0.1:4500".to_string(),
+            auth_token: None,
+        };
+
+        let resolved =
+            resolve_config_cwd_for_toml_load(Some(nonexistent.as_path()), &remote_target)
+                .expect("remote config cwd resolution should skip local cwd existence checks");
+
+        assert_eq!(
+            resolved,
+            AbsolutePathBuf::current_dir().expect("current dir should resolve")
+        );
+    }
+
+    #[test]
+    fn embedded_config_toml_cwd_requires_existing_cli_cwd() {
+        let nonexistent = std::env::temp_dir().join(format!("codex-missing-{}", Uuid::new_v4()));
+
+        let err = resolve_config_cwd_for_toml_load(
+            Some(nonexistent.as_path()),
+            &AppServerTarget::Embedded,
+        )
+        .expect_err("embedded mode should still validate cwd locally");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[tokio::test]
