@@ -9,6 +9,7 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -398,17 +399,27 @@ fn parse_rollout_usage(
     by_day: &mut BTreeMap<NaiveDate, i64>,
     by_model: &mut BTreeMap<String, ModelUsageSummary>,
 ) {
+    parse_rollout_usage_with_line_cap(
+        path,
+        by_day,
+        by_model,
+        /*line_cap*/ MAX_OBSERVABILITY_LINES_PER_FILE,
+    );
+}
+
+fn parse_rollout_usage_with_line_cap(
+    path: &Path,
+    by_day: &mut BTreeMap<NaiveDate, i64>,
+    by_model: &mut BTreeMap<String, ModelUsageSummary>,
+    line_cap: usize,
+) {
     let Ok(file) = File::open(path) else {
         return;
     };
     let reader = BufReader::new(file);
-    let mut model_for_turn = "unknown".to_string();
-    let mut seen_snapshots: HashSet<TokenSnapshotKey> = HashSet::new();
+    let mut recent_lines = VecDeque::new();
 
-    for (idx, line) in reader.lines().enumerate() {
-        if idx >= MAX_OBSERVABILITY_LINES_PER_FILE {
-            break;
-        }
+    for line in reader.lines() {
         let Ok(line) = line else {
             continue;
         };
@@ -416,7 +427,17 @@ fn parse_rollout_usage(
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
+        recent_lines.push_back(trimmed.to_string());
+        if recent_lines.len() > line_cap {
+            recent_lines.pop_front();
+        }
+    }
+
+    let mut model_for_turn = "unknown".to_string();
+    let mut seen_snapshots: HashSet<TokenSnapshotKey> = HashSet::new();
+
+    for line in recent_lines {
+        let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(line.as_str()) else {
             continue;
         };
         let RolloutLine { timestamp, item } = rollout_line;
@@ -643,6 +664,135 @@ mod tests {
         assert_eq!(
             by_model.get("alpha-model").map(|m| m.cached_input_tokens),
             Some(100)
+        );
+    }
+
+    #[test]
+    fn parse_rollout_usage_scans_recent_lines_when_capped() {
+        let mut rollout = NamedTempFile::new().expect("temp rollout file");
+
+        let turn_context_alpha = RolloutLine {
+            timestamp: "2026-01-10T12:00:00Z".to_string(),
+            item: RolloutItem::TurnContext(codex_protocol::protocol::TurnContextItem {
+                turn_id: Some("turn-1".to_string()),
+                trace_id: None,
+                cwd: PathBuf::from("/workspace/tests"),
+                current_date: None,
+                timezone: None,
+                approval_policy: AskForApproval::OnRequest,
+                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                network: None,
+                model: "alpha-model".to_string(),
+                personality: None,
+                collaboration_mode: None,
+                realtime_active: None,
+                effort: None,
+                summary: codex_protocol::config_types::ReasoningSummary::Auto,
+                user_instructions: None,
+                developer_instructions: None,
+                final_output_json_schema: None,
+                truncation_policy: None,
+            }),
+        };
+        let token_count_alpha = RolloutLine {
+            timestamp: "2026-01-10T12:00:05Z".to_string(),
+            item: RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+                info: Some(TokenUsageInfo {
+                    total_token_usage: TokenUsage::default(),
+                    last_token_usage: TokenUsage {
+                        input_tokens: 260,
+                        cached_input_tokens: 100,
+                        output_tokens: 140,
+                        reasoning_output_tokens: 0,
+                        total_tokens: 400,
+                    },
+                    model_context_window: None,
+                }),
+                rate_limits: None,
+            })),
+        };
+        let turn_context_beta = RolloutLine {
+            timestamp: "2026-01-10T12:10:00Z".to_string(),
+            item: RolloutItem::TurnContext(codex_protocol::protocol::TurnContextItem {
+                turn_id: Some("turn-2".to_string()),
+                trace_id: None,
+                cwd: PathBuf::from("/workspace/tests"),
+                current_date: None,
+                timezone: None,
+                approval_policy: AskForApproval::OnRequest,
+                sandbox_policy: SandboxPolicy::DangerFullAccess,
+                network: None,
+                model: "beta-model".to_string(),
+                personality: None,
+                collaboration_mode: None,
+                realtime_active: None,
+                effort: None,
+                summary: codex_protocol::config_types::ReasoningSummary::Auto,
+                user_instructions: None,
+                developer_instructions: None,
+                final_output_json_schema: None,
+                truncation_policy: None,
+            }),
+        };
+        let token_count_beta = RolloutLine {
+            timestamp: "2026-01-10T12:10:05Z".to_string(),
+            item: RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+                info: Some(TokenUsageInfo {
+                    total_token_usage: TokenUsage::default(),
+                    last_token_usage: TokenUsage {
+                        input_tokens: 120,
+                        cached_input_tokens: 50,
+                        output_tokens: 80,
+                        reasoning_output_tokens: 0,
+                        total_tokens: 200,
+                    },
+                    model_context_window: None,
+                }),
+                rate_limits: None,
+            })),
+        };
+
+        writeln!(
+            rollout,
+            "{}",
+            serde_json::to_string(&turn_context_alpha).expect("serialize alpha context")
+        )
+        .expect("write alpha context");
+        writeln!(
+            rollout,
+            "{}",
+            serde_json::to_string(&token_count_alpha).expect("serialize alpha token count")
+        )
+        .expect("write alpha token count");
+        writeln!(
+            rollout,
+            "{}",
+            serde_json::to_string(&turn_context_beta).expect("serialize beta context")
+        )
+        .expect("write beta context");
+        writeln!(
+            rollout,
+            "{}",
+            serde_json::to_string(&token_count_beta).expect("serialize beta token count")
+        )
+        .expect("write beta token count");
+
+        let mut by_day: BTreeMap<NaiveDate, i64> = BTreeMap::new();
+        let mut by_model: BTreeMap<String, ModelUsageSummary> = BTreeMap::new();
+        parse_rollout_usage_with_line_cap(
+            rollout.path(),
+            &mut by_day,
+            &mut by_model,
+            /*line_cap*/ 2,
+        );
+
+        let day = NaiveDate::from_ymd_opt(2026, 1, 10).expect("date");
+        assert_eq!(by_day.get(&day), Some(&150));
+        assert_eq!(by_model.get("alpha-model").map(|m| m.tokens), None);
+        assert_eq!(by_model.get("beta-model").map(|m| m.tokens), Some(150));
+        assert_eq!(
+            by_model.get("beta-model").map(|m| m.cached_input_tokens),
+            Some(50)
         );
     }
 }
