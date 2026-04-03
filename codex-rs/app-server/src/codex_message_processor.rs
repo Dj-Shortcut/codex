@@ -1,6 +1,7 @@
 use crate::bespoke_event_handling::apply_bespoke_event_handling;
 use crate::command_exec::CommandExecManager;
 use crate::command_exec::StartCommandExecParams;
+use crate::command_exec::normalize_command_exec_cwd;
 use crate::config_api::apply_runtime_feature_enablement;
 use crate::error_code::INPUT_TOO_LARGE_ERROR_CODE;
 use crate::error_code::INTERNAL_ERROR_CODE;
@@ -1813,7 +1814,15 @@ impl CodexMessageProcessor {
             return;
         }
 
-        let cwd = cwd.unwrap_or_else(|| self.config.cwd.to_path_buf());
+        let requested_cwd = cwd.unwrap_or_else(|| self.config.cwd.to_path_buf());
+        let cwd = normalize_command_exec_cwd(requested_cwd.clone());
+        if cwd != requested_cwd {
+            tracing::debug!(
+                requested_cwd = %requested_cwd.display(),
+                normalized_cwd = %cwd.display(),
+                "normalized command/exec cwd for native process startup"
+            );
+        }
         let mut env = create_env(
             &self.config.permissions.shell_environment_policy,
             /*thread_id*/ None,

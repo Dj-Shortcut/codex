@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
@@ -23,6 +24,7 @@ use codex_core::config::StartedNetworkProxy;
 use codex_core::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
 use codex_core::exec::ExecExpiration;
 use codex_core::exec::IO_DRAIN_TIMEOUT_MS;
+use codex_core::path_utils::normalize_for_native_workdir;
 use codex_core::sandboxing::ExecRequest;
 use codex_sandboxing::SandboxType;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
@@ -705,6 +707,10 @@ fn internal_error(message: String) -> JSONRPCErrorError {
     }
 }
 
+pub(crate) fn normalize_command_exec_cwd(cwd: PathBuf) -> PathBuf {
+    normalize_for_native_workdir(cwd)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1019,5 +1025,17 @@ mod tests {
 
         assert_eq!(err.code, INVALID_REQUEST_ERROR_CODE);
         assert_eq!(err.message, "command/exec \"proc-13\" is no longer running");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn normalize_command_exec_cwd_simplifies_windows_verbatim_paths() {
+        let normalized =
+            normalize_command_exec_cwd(PathBuf::from(r"\\?\D:\c\x\worktrees\2508\swift-base"));
+
+        assert_eq!(
+            normalized,
+            PathBuf::from(r"D:\c\x\worktrees\2508\swift-base")
+        );
     }
 }
